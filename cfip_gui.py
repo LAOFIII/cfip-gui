@@ -34,6 +34,15 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+try:
+    from presets import flat_sources, short_name
+except ImportError:  # 打包成单文件或模块缺失时降级为空清单
+    def flat_sources():
+        return []
+
+    def short_name(label):
+        return label
+
 APP_NAME = "cfip-gui"
 APP_VER = "1.0.0"
 
@@ -773,27 +782,52 @@ def run_gui():
             root.pack(fill="both", expand=True)
 
             # 输入区
-            box = ttk.LabelFrame(root, text="1) 测速目标（二选一）")
+            box = ttk.LabelFrame(root, text="1) 测速目标（三种方式任选）")
             box.pack(fill="x", **pad)
             nb = ttk.Notebook(box)
             nb.pack(fill="both", expand=True, padx=6, pady=6)
             self.nb = nb
 
+            # --- 页签 0：预设优选源
+            f0 = ttk.Frame(nb)
+            nb.add(f0, text="预设优选源")
+            ttk.Label(f0, text="选一个现成的源，点「拉取并测速」即可（源清单来自反代面板的预设优选源）。").pack(
+                anchor="w", padx=4, pady=(2, 4))
+            prow = ttk.Frame(f0)
+            prow.pack(fill="x", padx=4, pady=2)
+            ttk.Label(prow, text="来源：").pack(side="left")
+            self.var_preset = tk.StringVar()
+            self.cmb_preset = ttk.Combobox(prow, textvariable=self.var_preset, state="readonly", width=52)
+            self.cmb_preset.pack(side="left", fill="x", expand=True, padx=4)
+            ttk.Button(prow, text="拉取并测速", command=self.preset_fetch_test).pack(side="left", padx=2)
+            ttk.Button(prow, text="只取列表", command=self.preset_fetch_only).pack(side="left")
+            self.lbl_preset_url = ttk.Label(f0, text="", foreground="#3a6ea5", wraplength=1000, justify="left")
+            self.lbl_preset_url.pack(anchor="w", padx=4, pady=2)
+            self.var_api_proxy = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                f0, text="取列表允许走系统代理（仅取列表；测速流量仍强制直连）",
+                variable=self.var_api_proxy,
+            ).pack(anchor="w", padx=4)
+            ttk.Label(f0, text="提示：源清单是静态快照，若某个源失效会直接报错，可换一个源。",
+                      foreground="#666").pack(anchor="w", padx=4, pady=(0, 2))
+            self._init_presets()
+
+            # --- 页签 1：手动输入 IP
             f1 = ttk.Frame(nb)
             nb.add(f1, text="手动输入 IP")
             ttk.Label(f1, text="每行一个，也可用逗号/空格分隔；支持 CIDR（如 104.16.0.0/16 每 /24 随机取一个）").pack(anchor="w", padx=4)
             self.txt_ips = tk.Text(f1, height=6, wrap="none", font=("Consolas", 10))
             self.txt_ips.pack(fill="both", expand=True, padx=4, pady=4)
 
+            # --- 页签 2：自定义 API
             f2 = ttk.Frame(nb)
-            nb.add(f2, text="从 API 网址获取")
+            nb.add(f2, text="自定义 API 网址")
             row = ttk.Frame(f2)
             row.pack(fill="x", padx=4, pady=6)
             ttk.Label(row, text="网址：").pack(side="left")
-            self.var_api = tk.StringVar(value="https://ip.ehb.cc.cd/v6-cm?ips=100")
+            self.var_api = tk.StringVar(value="https://ip.v2too.top/api/nodes")
             ttk.Entry(row, textvariable=self.var_api).pack(side="left", fill="x", expand=True, padx=4)
             ttk.Button(row, text="只取列表（不测速）", command=self.fetch_only).pack(side="left")
-            self.var_api_proxy = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 f2, text="API 取列表允许走系统代理（仅取列表；测速流量仍强制直连）",
                 variable=self.var_api_proxy,
@@ -963,6 +997,71 @@ def run_gui():
             else:
                 self.lbl_direct.config(text="直连自检未通过：存在代理或 VPN，测速结果不可信（详见日志）", foreground="#c62828")
 
+        # ---- 预设优选源
+        def _init_presets(self):
+            self._preset_items = flat_sources()
+            values = [f"[{g}] {short_name(lbl)}" for g, lbl, _ in self._preset_items]
+            self.cmb_preset["values"] = values
+            if values:
+                self.cmb_preset.current(0)
+                self._on_preset_change()
+            self.cmb_preset.bind("<<ComboboxSelected>>", lambda e: self._on_preset_change())
+
+        def _on_preset_change(self):
+            idx = self.cmb_preset.current()
+            if idx < 0 or idx >= len(self._preset_items):
+                return
+            group, label, url = self._preset_items[idx]
+            self.lbl_preset_url.config(text=f"{label}　→　{url}")
+
+        def _selected_preset_url(self):
+            idx = self.cmb_preset.current()
+            if idx < 0 or idx >= len(self._preset_items):
+                return ""
+            return self._preset_items[idx][2]
+
+        def preset_fetch_only(self):
+            url = self._selected_preset_url()
+            if not url:
+                messagebox.showwarning("未选择来源", "请先在下拉框里选一个预设源。")
+                return
+            self.var_api.set(url)  # 同步到自定义 API 框，方便二次修改
+            self.log(f"从预设源取 IP 列表：{url}")
+            self.var_status.set("正在获取 IP 列表…")
+
+            def work():
+                ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                                         log=lambda m: self.q.put(("log", m)))
+                self.q.put(("apiresult", (ips, err)))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def preset_fetch_test(self):
+            url = self._selected_preset_url()
+            if not url:
+                messagebox.showwarning("未选择来源", "请先在下拉框里选一个预设源。")
+                return
+            if self.worker and self.worker.is_alive():
+                return
+            if self.self_test_ok is False and not self.var_force.get():
+                messagebox.showerror(
+                    "直连自检未通过",
+                    "检测到系统代理或 VPN/TUN 网卡，测速流量可能被中转，结果不可信。\n\n"
+                    "请先关闭代理软件与 VPN 后点「重新检测」。",
+                )
+                return
+            self.var_api.set(url)
+            self.btn_start["state"] = "disabled"
+            self.var_status.set("正在获取 IP 列表…")
+            self.log(f"从预设源取 IP 并测速：{url}")
+
+            def work():
+                ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                                         log=lambda m: self.q.put(("log", m)))
+                self.q.put(("startwith", (ips, err)))
+
+            threading.Thread(target=work, daemon=True).start()
+
         # ---- 取列表
         def fetch_only(self):
             url = self.var_api.get().strip()
@@ -995,7 +1094,7 @@ def run_gui():
             shown = ips[:limit]
             self.txt_ips.delete("1.0", "end")
             self.txt_ips.insert("1.0", "\n".join(shown))
-            self.nb.select(0)  # 自动切到「手动输入 IP」页
+            self.nb.select(1)  # 自动切到「手动输入 IP」页
             self.var_status.set(f"已取到 {len(shown)} 个 IP")
             msg = f"已取到 {len(ips)} 个 IP，已填入「手动输入 IP」页"
             if len(ips) > limit:
@@ -1044,11 +1143,11 @@ def run_gui():
                 )
                 return
 
-            # 停在「API 网址」页时，先后台取列表，取到再开始测速
-            if self.nb.index(self.nb.select()) == 1:
+            # 停在「自定义 API 网址」页时，先后台取列表，取到再开始测速
+            if self.nb.index(self.nb.select()) == 2:
                 url = self.var_api.get().strip()
                 if not url:
-                    messagebox.showwarning("缺少网址", "请在「从 API 网址获取」页填写 API 网址，或切到「手动输入 IP」页。")
+                    messagebox.showwarning("缺少网址", "请在「自定义 API 网址」页填写网址，或改用「预设优选源」/「手动输入 IP」。")
                     return
                 self.btn_start["state"] = "disabled"
                 self.var_status.set("正在获取 IP 列表…")
@@ -1068,7 +1167,7 @@ def run_gui():
             if trunc:
                 self.log(f"IP 数量超过上限，已截断为 {self.var_max.get()} 个")
             if not ips:
-                messagebox.showwarning("没有可测的 IP", "请输入至少一个合法 IP，或切到「从 API 网址获取」页填写网址。")
+                messagebox.showwarning("没有可测的 IP", "请输入至少一个合法 IP，或改用「预设优选源」/「自定义 API 网址」。")
                 return
             self._begin_run(ips)
 
