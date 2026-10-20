@@ -8,7 +8,16 @@
 
 ![界面示意](docs/screenshot.png)
 
-## 快速开始
+## 给不想装 Python 的人（Windows 直接双击）
+
+1. 到 [Releases](https://github.com/LAOFENG543/cfip-gui/releases/latest) 下载 `cfip-gui-windows-x64.zip`
+2. **解压到任意文件夹**（不要只把 exe 拖出来，`_internal` 文件夹要和 exe 放在一起）
+3. 双击 `cfip-gui.exe` —— 这就是全部步骤，不需要装 Python、不需要命令行
+
+> 第一次运行 Windows 可能弹「Windows 已保护你的电脑」：点「更多信息」→「仍要运行」。
+> 这是未签名程序的常规提示，不是病毒。
+
+## 快速开始（从源码运行）
 
 ```bash
 # 需要 Python 3.9+（Windows 用 py 启动器）
@@ -105,7 +114,19 @@ cfip_gui.py        # 全部代码（GUI + CLI + 测速核心 + 直连自检）
 README.md
 LICENSE
 docs/screenshot.png
+build_exe.bat      # 一键打包 Windows exe（需 PyInstaller）
 ```
+
+## 自己打包 exe
+
+```bash
+py -m pip install pyinstaller
+build_exe.bat
+# 产物：dist\cfip-gui\cfip-gui.exe（连同 _internal 目录一起分发）
+```
+
+> 用 `--onedir` 而不是 `--onefile`：单文件模式启动时要把自身解压到 `%TEMP%`，
+> 部分杀软会拦这一步并报 `Could not create temporary directory!`，onedir 没有这个坑，启动也更快。
 
 ## 已知限制
 

@@ -3,3 +3,6 @@ __pycache__/
 result.csv
 *.log
 .venv/
+build/
+dist/
+*.spec

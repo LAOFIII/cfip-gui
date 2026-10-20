@@ -1077,18 +1077,54 @@ def run_gui():
     return 0
 
 
+def _frozen():
+    return bool(getattr(sys, "frozen", False))
+
+
+def _ensure_console():
+    """打包成无控制台 exe 后，--cli 模式需要自己挂一个控制台窗口，否则看不到输出。"""
+    if not _frozen() or sys.stdout is not None:
+        return
+    try:
+        import ctypes
+        if ctypes.windll.kernel32.AllocConsole():
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    except Exception:
+        pass
+
+
+def _fatal_gui_error(exc):
+    """无控制台时，把启动失败原因弹窗告诉用户，而不是静默退出。"""
+    msg = (
+        f"程序启动失败：\n\n{type(exc).__name__}: {exc}\n\n"
+        "如果是缺少 tkinter，请安装完整版 Python 后重试；\n"
+        "也可以改用命令行模式运行。"
+    )
+    try:
+        import tkinter.messagebox as mb
+        mb.showerror(f"{APP_NAME} 启动失败", msg)
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, msg, f"{APP_NAME} 启动失败", 0x10)
+        except Exception:
+            pass
+
+
 def main():
     argv = sys.argv[1:]
     clear_proxy_env()
     if argv and argv[0] in ("--cli",):
+        _ensure_console()
         return run_cli(argv[1:])
     if argv and argv[0] in ("--selftest",):
+        _ensure_console()
         return run_cli(argv)
     try:
         return run_gui()
     except Exception as exc:  # noqa: BLE001
-        print(f"GUI 启动失败（{type(exc).__name__}: {exc}），可改用命令行："
-              f"py {os.path.basename(__file__)} --cli --ips 1.1.1.1,1.0.0.1", file=sys.stderr)
+        _fatal_gui_error(exc)
         return 1
 
 
