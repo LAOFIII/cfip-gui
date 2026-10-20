@@ -10,7 +10,7 @@
 
 ## 给不想装 Python 的人（Windows 直接双击）
 
-1. 到 [Releases](https://github.com/LAOFENG543/cfip-gui/releases/latest) 下载 `cfip-gui-windows-x64.zip`
+1. 到 [Releases](https://github.com/LAOFIII/cfip-gui/releases/latest) 下载 `cfip-gui-windows-x64.zip`
 2. **解压到任意文件夹**（不要只把 exe 拖出来，`_internal` 文件夹要和 exe 放在一起）
 3. 双击 `cfip-gui.exe` —— 这就是全部步骤，不需要装 Python、不需要命令行
 
