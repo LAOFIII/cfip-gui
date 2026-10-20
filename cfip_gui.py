@@ -930,6 +930,10 @@ def run_gui():
                         self._reset_buttons()
                     elif kind == "selftest":
                         self._on_selftest(payload)
+                    elif kind == "apiresult":
+                        self._on_apiresult(payload)
+                    elif kind == "startwith":
+                        self._on_startwith(payload)
             except queue.Empty:
                 pass
             self.after(120, self._drain)
@@ -963,7 +967,11 @@ def run_gui():
         def fetch_only(self):
             url = self.var_api.get().strip()
             allow_proxy = self.var_api_proxy.get()
+            if not url:
+                messagebox.showwarning("缺少网址", "请先填写 API 网址。")
+                return
             self.log(f"开始从 API 取 IP 列表：{url}")
+            self.var_status.set("正在获取 IP 列表…")
 
             def work():
                 ips, err = fetch_ip_list(url, allow_proxy=allow_proxy, log=lambda m: self.q.put(("log", m)))
@@ -971,22 +979,58 @@ def run_gui():
 
             threading.Thread(target=work, daemon=True).start()
 
+        def _on_apiresult(self, payload):
+            """把 API 取回的 IP 填进「手动输入 IP」页，方便核对后再测速。"""
+            ips, err = payload
+            if err:
+                self.var_status.set("获取失败")
+                self.log("错误：" + err)
+                messagebox.showerror("API 取列表失败", err)
+                return
+            if not ips:
+                self.var_status.set("未取到 IP")
+                messagebox.showwarning("未取到 IP", "接口返回成功，但没解析出任何 IP。\n请检查返回格式，日志里有返回内容摘要。")
+                return
+            limit = self.var_max.get()
+            shown = ips[:limit]
+            self.txt_ips.delete("1.0", "end")
+            self.txt_ips.insert("1.0", "\n".join(shown))
+            self.nb.select(0)  # 自动切到「手动输入 IP」页
+            self.var_status.set(f"已取到 {len(shown)} 个 IP")
+            msg = f"已取到 {len(ips)} 个 IP，已填入「手动输入 IP」页"
+            if len(ips) > limit:
+                msg += f"（超出上限 {limit}，仅填入前 {limit} 个）"
+            self.log(msg + "，可直接点「开始测速」。")
+            if len(ips) > limit:
+                messagebox.showinfo("已填入 IP", msg)
+
+        def _on_startwith(self, payload):
+            """API 取到列表后自动填入并直接开始测速。"""
+            ips, err = payload
+            if err:
+                self.btn_start["state"] = "normal"
+                self.var_status.set("获取失败")
+                self.log("错误：" + err)
+                messagebox.showerror("API 取列表失败", err)
+                return
+            if not ips:
+                self.btn_start["state"] = "normal"
+                self.var_status.set("未取到 IP")
+                messagebox.showwarning("未取到 IP", "接口返回成功，但没解析出任何 IP。\n请检查返回格式，日志里有返回内容摘要。")
+                return
+            limit = self.var_max.get()
+            shown = ips[:limit]
+            self.txt_ips.delete("1.0", "end")
+            self.txt_ips.insert("1.0", "\n".join(shown))
+            self.log(f"已取到 {len(ips)} 个 IP，开始测速" +
+                     (f"（超出上限 {limit}，仅测前 {limit} 个）" if len(ips) > limit else ""))
+            self._begin_run(shown)
+
         # ---- 开始 / 停止
         def collect_ips(self):
-            tab = self.nb.index(self.nb.select())
-            if tab == 0:
-                text = self.txt_ips.get("1.0", "end")
-                return parse_ip_text(text, self.var_max.get())
-            url = self.var_api.get().strip()
-            if not url:
-                return [], ["（未填写 API 网址）"], False
-            ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(), log=self.log)
-            if err:
-                messagebox.showerror("API 取列表失败", err)
-                return [], [], False
-            if len(ips) > self.var_max.get():
-                return ips[: self.var_max.get()], [], True
-            return ips, [], False
+            """只处理「手动输入 IP」页；API 页的取列表在 start() 里异步做，避免卡界面。"""
+            text = self.txt_ips.get("1.0", "end")
+            return parse_ip_text(text, self.var_max.get())
 
         def start(self):
             if self.worker and self.worker.is_alive():
@@ -999,15 +1043,37 @@ def run_gui():
                     "如确认要冒险测试，勾选「自检不通过也继续」。",
                 )
                 return
+
+            # 停在「API 网址」页时，先后台取列表，取到再开始测速
+            if self.nb.index(self.nb.select()) == 1:
+                url = self.var_api.get().strip()
+                if not url:
+                    messagebox.showwarning("缺少网址", "请在「从 API 网址获取」页填写 API 网址，或切到「手动输入 IP」页。")
+                    return
+                self.btn_start["state"] = "disabled"
+                self.var_status.set("正在获取 IP 列表…")
+                self.log(f"先从 API 获取 IP 列表：{url}")
+
+                def fetch_then_start():
+                    ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                                             log=lambda m: self.q.put(("log", m)))
+                    self.q.put(("startwith", (ips, err)))
+
+                threading.Thread(target=fetch_then_start, daemon=True).start()
+                return
+
             ips, bad, trunc = self.collect_ips()
             if bad:
                 self.log("忽略非法输入：" + ", ".join(bad[:10]))
             if trunc:
                 self.log(f"IP 数量超过上限，已截断为 {self.var_max.get()} 个")
             if not ips:
-                messagebox.showwarning("没有可测的 IP", "请输入至少一个合法 IP，或填写可用的 API 网址。")
+                messagebox.showwarning("没有可测的 IP", "请输入至少一个合法 IP，或切到「从 API 网址获取」页填写网址。")
                 return
+            self._begin_run(ips)
 
+        def _begin_run(self, ips):
+            """真正启动测速线程（手动 IP 与 API 两条路共用）。"""
             opts = Options(
                 port=int(self.var_port.get()), threads=int(self.var_n.get()),
                 pings=int(self.var_t.get()), timeout=float(self.var_timeout.get()),
@@ -1028,8 +1094,7 @@ def run_gui():
             def work():
                 runner = Runner(ips, opts, emit=lambda t, p: self.q.put((t, p)), stop_event=self.stop_event)
                 try:
-                    res = runner.run()
-                    self.q.put(("results", res))
+                    runner.run()  # 结束时 Runner 自己会 emit("done", results)
                 except Exception as exc:  # noqa: BLE001
                     self.q.put(("error", f"运行异常：{type(exc).__name__}: {exc}"))
                     self.q.put(("stopped", None))
