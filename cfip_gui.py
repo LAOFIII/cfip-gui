@@ -43,8 +43,17 @@ except ImportError:  # 打包成单文件或模块缺失时降级为空清单
     def short_name(label):
         return label
 
+try:
+    from proxycfg import MODE_NONE, MODES, ProxyConfig, fetch_url, probe_proxy
+except ImportError:  # 兜底：代理模块缺失时退化为直连
+    MODE_NONE = "不使用代理"
+    MODES = (MODE_NONE,)
+    ProxyConfig = None
+    fetch_url = None
+    probe_proxy = None
+
 APP_NAME = "cfip-gui"
-APP_VER = "1.0.0"
+APP_VER = "1.2.0"
 
 # ---------------------------------------------------------------- 直连基础
 
@@ -300,33 +309,39 @@ def parse_ip_text(text, max_n=500):
 
 # ---------------------------------------------------------------- API 取列表
 
-def fetch_ip_list(url, timeout=20, retries=2, allow_proxy=False, log=None):
+def fetch_ip_list(url, proxy=None, timeout=20, retries=2, log=None):
     """请求 API 并解析出 IP 列表。返回 (ips, err)。
 
+    proxy: ProxyConfig，或 None / mode=不使用代理 → 直连（忽略系统代理）。
     兼容返回格式：纯文本每行一个 IP、逗号/空格分隔、JSON 数组、JSON 对象内的字符串数组。
     """
     log = log or (lambda *_: None)
     if not re.match(r"^https?://", url or "", re.I):
         return [], "网址必须以 http:// 或 https:// 开头"
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({} if not allow_proxy else urllib.request.getproxies())
-    )
-    req = urllib.request.Request(url, headers={
+    if proxy is not None:
+        err = proxy.validate()
+        if err:
+            return [], err
+    route = proxy.describe() if proxy else "直连"
+    headers = {
         "User-Agent": f"{APP_NAME}/{APP_VER}",
         "Accept": "text/plain, application/json, */*",
-    })
+    }
     last = ""
     for attempt in range(1, retries + 1):
         try:
-            log(f"请求 API（第 {attempt} 次，{'经系统代理' if allow_proxy else '直连'}）：{url}")
-            with opener.open(req, timeout=timeout) as resp:
-                raw = resp.read(2 * 1024 * 1024)
-                text = raw.decode("utf-8", "replace")
-                log(f"HTTP {resp.status}，{len(raw)} 字节")
-            ips = _extract_ips_from_payload(text)
-            if ips:
-                return ips, None
-            return [], "接口返回成功但未解析到任何 IP（内容前 200 字：%r）" % text[:200]
+            log(f"请求 API（第 {attempt} 次，{route}）：{url}")
+            status, raw = fetch_url(url, proxy, timeout=timeout, headers=headers)
+            text = raw.decode("utf-8", "replace")
+            log(f"HTTP {status}，{len(raw)} 字节")
+            if status and status >= 400:
+                last = f"HTTP {status}"
+                log("失败：" + last)
+            else:
+                ips = _extract_ips_from_payload(text)
+                if ips:
+                    return ips, None
+                return [], "接口返回成功但未解析到任何 IP（内容前 200 字：%r）" % text[:200]
         except urllib.error.HTTPError as exc:
             last = f"HTTP {exc.code} {exc.reason}"
             log("失败：" + last)
@@ -336,8 +351,9 @@ def fetch_ip_list(url, timeout=20, retries=2, allow_proxy=False, log=None):
         if attempt < retries:
             time.sleep(1.0)
     hint = ""
-    if not allow_proxy:
-        hint = "（若该域名直连被重置/超时，可勾选「API 取列表允许走系统代理」——仅取列表，测速流量仍强制直连）"
+    if proxy is None or proxy.mode == "不使用代理":
+        hint = ("（若该域名直连被重置/超时，可在「代理设置」里选 HTTP 或 SOCKS5 并填 127.0.0.1:7890 —— "
+                "仅用于取 IP 列表，测速流量仍强制直连）")
     return [], f"API 请求失败：{last}{hint}"
 
 
@@ -698,7 +714,7 @@ def run_cli(argv):
     if a.ips:
         ips, bad, trunc = parse_ip_text(a.ips, a.max)
     elif a.api:
-        ips, err = fetch_ip_list(a.api, allow_proxy=False, log=lambda m: print("  " + m))
+        ips, err = fetch_ip_list(a.api, proxy=None, log=lambda m: print("  " + m))
         if err:
             print("[错误] " + err)
             return 1
@@ -764,8 +780,8 @@ def run_gui():
         def __init__(self):
             super().__init__()
             self.title(f"{APP_NAME} v{APP_VER} —— 自选 IP 测速（强制直连）")
-            self.geometry("1180x820")
-            self.minsize(980, 700)
+            self.geometry("1180x900")
+            self.minsize(980, 780)
             self.q = queue.Queue()
             self.worker = None
             self.stop_event = threading.Event()
@@ -803,12 +819,8 @@ def run_gui():
             ttk.Button(prow, text="只取列表", command=self.preset_fetch_only).pack(side="left")
             self.lbl_preset_url = ttk.Label(f0, text="", foreground="#3a6ea5", wraplength=1000, justify="left")
             self.lbl_preset_url.pack(anchor="w", padx=4, pady=2)
-            self.var_api_proxy = tk.BooleanVar(value=False)
-            ttk.Checkbutton(
-                f0, text="取列表允许走系统代理（仅取列表；测速流量仍强制直连）",
-                variable=self.var_api_proxy,
-            ).pack(anchor="w", padx=4)
-            ttk.Label(f0, text="提示：源清单是静态快照，若某个源失效会直接报错，可换一个源。",
+            ttk.Label(f0, text="提示：源清单是静态快照，若某个源失效会直接报错，可换一个源；"
+                               "直连取不到时去「代理设置」填一个代理。",
                       foreground="#666").pack(anchor="w", padx=4, pady=(0, 2))
             self._init_presets()
 
@@ -828,12 +840,48 @@ def run_gui():
             self.var_api = tk.StringVar(value="https://ip.v2too.top/api/nodes")
             ttk.Entry(row, textvariable=self.var_api).pack(side="left", fill="x", expand=True, padx=4)
             ttk.Button(row, text="只取列表（不测速）", command=self.fetch_only).pack(side="left")
-            ttk.Checkbutton(
-                f2, text="API 取列表允许走系统代理（仅取列表；测速流量仍强制直连）",
-                variable=self.var_api_proxy,
-            ).pack(anchor="w", padx=4)
             ttk.Label(f2, text="取回的 IP 会填入「手动输入 IP」页，可先核对再开始测速。",
                       foreground="#666").pack(anchor="w", padx=4, pady=2)
+
+            # --- 代理设置（只用于取 IP 列表）
+            gbox = ttk.LabelFrame(root, text="代理设置（仅用于「取 IP 列表」；测速流量始终直连）")
+            gbox.pack(fill="x", **pad)
+            grow = ttk.Frame(gbox)
+            grow.pack(fill="x", padx=6, pady=6)
+
+            left = ttk.Frame(grow)
+            left.pack(side="left", anchor="n")
+            self.var_proxy_mode = tk.StringVar(value=MODE_NONE)
+            for m in MODES:
+                ttk.Radiobutton(left, text=m, value=m, variable=self.var_proxy_mode,
+                                command=self._on_proxy_mode).pack(anchor="w", pady=1)
+
+            form = ttk.Frame(grow)
+            form.pack(side="left", fill="x", expand=True, padx=(24, 0))
+            self.var_proxy_host = tk.StringVar(value="127.0.0.1")
+            self.var_proxy_port = tk.IntVar(value=7890)
+            self.var_proxy_user = tk.StringVar(value="")
+            self.var_proxy_pass = tk.StringVar(value="")
+
+            def prow_(r, label, var, width=28, show=None):
+                ttk.Label(form, text=label, width=7, anchor="e").grid(row=r, column=0, sticky="e", pady=3)
+                ent = ttk.Entry(form, textvariable=var, width=width, show=show)
+                ent.grid(row=r, column=1, sticky="w", padx=6, pady=3)
+                return ent
+
+            self._ent_proxy_host = prow_(0, "服务器：", self.var_proxy_host)
+            self._ent_proxy_port = prow_(1, "端口：", self.var_proxy_port, width=10)
+            self._ent_proxy_user = prow_(2, "用户名：", self.var_proxy_user)
+            self._ent_proxy_pass = prow_(3, "密码：", self.var_proxy_pass, show="*")
+
+            btns = ttk.Frame(form)
+            btns.grid(row=0, column=2, rowspan=4, padx=16, sticky="n")
+            ttk.Button(btns, text="检测", command=self.test_proxy).pack(fill="x", pady=2)
+            self.lbl_proxy_status = ttk.Label(btns, text="", foreground="#666", wraplength=260, justify="left")
+            self.lbl_proxy_status.pack(fill="x", pady=4)
+            ttk.Label(grow, text="提示：只取列表走代理，所有测速 socket 仍直连目标 IP，不受这里影响。",
+                      foreground="#666").pack(anchor="w", padx=6, pady=(0, 6))
+            self._on_proxy_mode()
 
             # 参数区
             pbox = ttk.LabelFrame(root, text="2) 参数")
@@ -929,12 +977,14 @@ def run_gui():
             paned.add(rbox, weight=3)
 
             lbox = ttk.LabelFrame(paned, text="5) 运行日志")
-            self.txt_log = tk.Text(lbox, height=8, wrap="word", font=("Consolas", 9))
+            self.txt_log = tk.Text(lbox, height=7, wrap="word", font=("Consolas", 9))
             lvsb = ttk.Scrollbar(lbox, orient="vertical", command=self.txt_log.yview)
             self.txt_log.configure(yscrollcommand=lvsb.set)
             self.txt_log.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
             lvsb.pack(side="right", fill="y", pady=4)
             paned.add(lbox, weight=2)
+            # 让窗口变矮时优先压缩日志区，结果表保持可读
+            paned.pane(rbox, weight=4)
 
         # ---- 工具
         def _clear(self, widget):
@@ -968,6 +1018,8 @@ def run_gui():
                         self._on_apiresult(payload)
                     elif kind == "startwith":
                         self._on_startwith(payload)
+                    elif kind == "proxytest":
+                        self._on_proxytest(payload)
             except queue.Empty:
                 pass
             self.after(120, self._drain)
@@ -996,6 +1048,60 @@ def run_gui():
                 self.lbl_direct.config(text="直连自检通过：无系统代理 / 无 VPN 网卡，出口为本地直连", foreground="#1a7f37")
             else:
                 self.lbl_direct.config(text="直连自检未通过：存在代理或 VPN，测速结果不可信（详见日志）", foreground="#c62828")
+
+        # ---- 代理设置
+        def _on_proxy_mode(self):
+            """按所选模式启用/禁用输入框；不选代理时四个框都灰掉。"""
+            on = self.var_proxy_mode.get() != MODE_NONE
+            state = "normal" if on else "disabled"
+            for var_name in ("_ent_proxy_host", "_ent_proxy_port", "_ent_proxy_user", "_ent_proxy_pass"):
+                w = getattr(self, var_name, None)
+                if w is not None:
+                    w.configure(state=state)
+            if not on:
+                self.lbl_proxy_status.config(text="直连（不走任何代理）", foreground="#666")
+
+        def current_proxy(self):
+            """把界面上的代理设置转成 ProxyConfig。"""
+            if ProxyConfig is None:
+                return None
+            mode = self.var_proxy_mode.get()
+            if mode == MODE_NONE:
+                return ProxyConfig()
+            try:
+                port = int(self.var_proxy_port.get())
+            except (tk.TclError, ValueError):
+                port = 0
+            return ProxyConfig(mode, self.var_proxy_host.get(), port,
+                               self.var_proxy_user.get(), self.var_proxy_pass.get())
+
+        def test_proxy(self):
+            if probe_proxy is None:
+                messagebox.showerror("不可用", "代理模块未加载。")
+                return
+            proxy = self.current_proxy()
+            if proxy is None or proxy.mode == MODE_NONE:
+                self.lbl_proxy_status.config(text="当前是直连模式，无需检测", foreground="#666")
+                return
+            err = proxy.validate()
+            if err:
+                self.lbl_proxy_status.config(text=err, foreground="#c62828")
+                return
+            self.lbl_proxy_status.config(text="检测中…", foreground="#b36b00")
+
+            def work():
+                ok, msg = probe_proxy(proxy)
+                self.q.put(("proxytest", (ok, msg)))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _on_proxytest(self, payload):
+            ok, msg = payload
+            self.lbl_proxy_status.config(
+                text=("✔ " if ok else "✘ ") + msg,
+                foreground="#1a7f37" if ok else "#c62828",
+            )
+            self.log(("代理检测通过：" if ok else "代理检测失败：") + msg)
 
         # ---- 预设优选源
         def _init_presets(self):
@@ -1028,9 +1134,10 @@ def run_gui():
             self.var_api.set(url)  # 同步到自定义 API 框，方便二次修改
             self.log(f"从预设源取 IP 列表：{url}")
             self.var_status.set("正在获取 IP 列表…")
+            proxy_cfg = self.current_proxy()  # 主线程取值，避免后台线程读 tk 变量
 
             def work():
-                ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                ips, err = fetch_ip_list(url, proxy=proxy_cfg,
                                          log=lambda m: self.q.put(("log", m)))
                 self.q.put(("apiresult", (ips, err)))
 
@@ -1054,9 +1161,10 @@ def run_gui():
             self.btn_start["state"] = "disabled"
             self.var_status.set("正在获取 IP 列表…")
             self.log(f"从预设源取 IP 并测速：{url}")
+            proxy_cfg = self.current_proxy()  # 主线程取值
 
             def work():
-                ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                ips, err = fetch_ip_list(url, proxy=proxy_cfg,
                                          log=lambda m: self.q.put(("log", m)))
                 self.q.put(("startwith", (ips, err)))
 
@@ -1065,7 +1173,7 @@ def run_gui():
         # ---- 取列表
         def fetch_only(self):
             url = self.var_api.get().strip()
-            allow_proxy = self.var_api_proxy.get()
+            proxy_cfg = self.current_proxy()
             if not url:
                 messagebox.showwarning("缺少网址", "请先填写 API 网址。")
                 return
@@ -1073,7 +1181,7 @@ def run_gui():
             self.var_status.set("正在获取 IP 列表…")
 
             def work():
-                ips, err = fetch_ip_list(url, allow_proxy=allow_proxy, log=lambda m: self.q.put(("log", m)))
+                ips, err = fetch_ip_list(url, proxy=proxy_cfg, log=lambda m: self.q.put(("log", m)))
                 self.q.put(("apiresult", (ips, err)))
 
             threading.Thread(target=work, daemon=True).start()
@@ -1152,9 +1260,10 @@ def run_gui():
                 self.btn_start["state"] = "disabled"
                 self.var_status.set("正在获取 IP 列表…")
                 self.log(f"先从 API 获取 IP 列表：{url}")
+                proxy_cfg = self.current_proxy()  # 主线程取值
 
                 def fetch_then_start():
-                    ips, err = fetch_ip_list(url, allow_proxy=self.var_api_proxy.get(),
+                    ips, err = fetch_ip_list(url, proxy=proxy_cfg,
                                              log=lambda m: self.q.put(("log", m)))
                     self.q.put(("startwith", (ips, err)))
 

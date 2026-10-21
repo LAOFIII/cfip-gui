@@ -38,8 +38,8 @@ py cfip_gui.py
 
 开始前看一眼「直连自检」一栏是否为绿色通过，测完结果表按下载速度排序，可「导出 CSV」。
 
-> 如果某个源直连被 RST（国内访问 `ip.ehb.cc.cd` 常见），勾上「取列表允许走系统代理」——
-> **只影响取 IP 列表这一步，测速流量仍然强制直连。**
+> 如果某个源直连被 RST（国内访问 `ip.ehb.cc.cd` 常见），去「代理设置」选 HTTP 或 SOCKS5、
+> 填 `127.0.0.1:7890` 即可 —— **只用于取 IP 列表，测速流量仍然强制直连。**
 
 命令行模式（脚本 / 无界面环境）：
 
@@ -117,7 +117,6 @@ py cfip_gui.py --cli --ips 1.1.1.1 --force
 
 - 进程启动即删除 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` 等环境变量
 - 所有测速 socket 直接 `connect((ip, port))`，**不经过任何代理层**；目标 IP 由你指定，不做域名解析
-- API 取列表默认也用空 `ProxyHandler` 直连；个别域名直连会被重置时，可勾选「API 取列表允许走系统代理」——**只影响取列表，不影响测速流量**
 - 启动自检（`direct_selftest()`）检查四件事：
   1. Windows 系统代理（注册表 `ProxyEnable`/`ProxyServer`）
   2. WinHTTP 代理（`netsh winhttp show proxy`）
@@ -125,6 +124,23 @@ py cfip_gui.py --cli --ips 1.1.1.1 --force
   4. 直连 `www.cloudflare.com/cdn-cgi/trace` 拿真实出口 IP / 地区 / warp 状态
 
 判定规则：**VPN 网卡存在、或出口 warp≠off → 判定非直连并阻断测速**；系统代理只影响浏览器等 WinINET 应用，本程序 socket 不受其影响，因此仅告警不阻断。想强行跑可勾选「自检不通过也继续」。
+
+## 代理设置（只用于取 IP 列表）
+
+国内直连 `ip.ehb.cc.cd` 这类源常被 RST，所以「取 IP 列表」这一步允许走代理。**测速流量永远直连，不受这里影响。**
+
+| 模式 | 说明 |
+| --- | --- |
+| 不使用代理 | 默认，纯直连 |
+| HTTP代理 | HTTPS 走 `CONNECT` 隧道，支持 `Proxy-Authorization` 账号密码 |
+| SOCKS4代理 | CONNECT 命令，仅支持 IPv4 目标 |
+| SOCKS5代理 | 完整实现，支持账号密码认证（RFC 1929）与 IPv4/IPv6/域名目标 |
+
+填好服务器/端口（本地 Clash 一般是 `127.0.0.1:7890`）后点「检测」即可验证：
+能穿透到目标 443 会显示绿色 `✔ SOCKS5代理 可用`，失败会给出具体原因（认证错误、连接被拒绝、目标不可达等）。
+
+代理实现在独立的 [`proxycfg.py`](proxycfg.py)，纯标准库手写 SOCKS 握手，不依赖 PySocks。
+密码只存在内存，不写盘、不进日志。
 
 ## 边界情况
 
@@ -146,6 +162,7 @@ API 返回格式兼容：纯文本每行一个 IP、逗号/空格分隔、JSON �
 ```
 cfip_gui.py        # 主程序（GUI + CLI + 测速核心 + 直连自检）
 presets.py         # 预设优选源清单（33 个源，来自 EmbyProxyCF-Lite 面板）
+proxycfg.py        # 取列表用的 HTTP / SOCKS4 / SOCKS5 代理（纯标准库）
 README.md
 LICENSE
 docs/screenshot.png
